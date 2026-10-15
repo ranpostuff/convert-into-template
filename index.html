@@ -1,97 +1,288 @@
 <!doctype html>
 <html lang="en">
-<head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>ASTIG Excel Converter</title><meta name="description" content="Convert Excel class lists into ASTIG bulk-import workbooks in your browser."></head>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light dark">
+<title>ASTIG Excel Converter</title>
+<meta name="description" content="Convert Excel class lists into ASTIG bulk-import workbooks in your browser.">
+<style>
+  body{font-family:system-ui,-apple-system,Segoe UI,sans-serif;max-width:1100px;margin:0 auto;padding:1rem;line-height:1.5}
+  section{border:1px solid #8886;border-radius:8px;padding:.25rem 1rem .75rem;margin:1rem 0}
+  button{padding:.45rem .9rem;cursor:pointer}
+  .wrap{overflow:auto;max-height:70vh;margin-top:.5rem}
+  table{border-collapse:collapse;font-size:.85rem}
+  th,td{border:1px solid #8885;padding:2px 4px;text-align:left;vertical-align:top;white-space:nowrap}
+  td:last-child{white-space:normal;min-width:16rem}
+  th{position:sticky;top:0;background:Canvas}
+  .warn{color:#e8590c}
+  .err{color:#e03131}
+  .ok{color:#2f9e44}
+</style>
+</head>
 <body>
 <main>
 <h1>ASTIG Excel Converter</h1>
 <p>Choose your Excel class lists, press Convert, then download the ASTIG files.</p>
 <p>Your student data stays in this browser. Files are not sent to a server. Internet is needed to load the conversion library.</p>
-<p><label>Excel files (.xlsx): <input id="files" type="file" accept=".xlsx" multiple></label></p>
-<p><label>Names without commas: <select id="order"><option value="auto">Automatic (use the source heading)</option><option value="first">First Middle Last</option><option value="last">Last First Middle</option></select></label></p>
+<p><label>Excel files (.xlsx): <input id="files" type="file" accept=".xlsx,.xlsm" multiple></label></p>
+<p><label>Names without commas:
+  <select id="order">
+    <option value="auto">Automatic (use the column heading, else the file)</option>
+    <option value="first">First Middle Last</option>
+    <option value="last">Last First Middle</option>
+  </select></label></p>
+<p><label>Middle name when it is not written separately:
+  <select id="middle">
+    <option value="auto">Automatic (last word is the middle name if the heading says Last, First, Middle)</option>
+    <option value="on">Always treat the last given-name word as the middle name</option>
+    <option value="off">Keep everything in First Name</option>
+  </select></label></p>
 <p><button id="convert" type="button">Convert</button> <button id="clear" type="button">Clear</button></p>
 <p id="status" role="status" aria-live="polite">No files converted yet.</p>
-<section id="results" aria-label="Converted files"></section>
+<section id="messages" aria-label="Messages" hidden></section>
+<section id="results-wrap" hidden><div id="results" aria-label="Converted files"></div></section>
 <p><button id="download-all" type="button" hidden>Download all as ZIP</button></p>
 <details><summary>Supported format and important notes</summary>
-<p>Accepts the class-list format with student name, parent name, parent email, parent phone and LRN; a two-column Name / LRN list; or an existing ASTIG file. All recognized worksheets are converted separately. Save older .xls files as .xlsx in Excel first.</p>
+<p>Accepts the class-list format with student name, parent name, parent email, parent phone and LRN; a two-column Name / LRN list; separate First / Middle / Last columns; or an existing ASTIG file. Blank columns, numbering columns and extra columns are ignored. If a workbook has several sheets, only sheets with an LRN column are converted (so an "address" sheet is skipped); if no sheet has an LRN column, every sheet with names is converted.</p>
 <p>Output columns: LRN, First Name, Middle Name, Last Name, Extension, Parent Mobile No, Parent Email.</p>
-<p>Names without explicit separators are split provisionally. Check them under Review and edit. Missing or invalid LRNs are preserved for correction. Duplicate LRNs are flagged across all selected files. Parent names have no field in the ASTIG template.</p>
-<p>Ten-digit mobile numbers beginning with 9 receive a leading 0. No LRN digits are guessed. Downloads include all listed students, including any unresolved warnings. ASTIG may reject invalid records. Select the grade and section in ASTIG when importing.</p>
+<p>Names are split using the heading: “Last Name, First Name, Middle Name” means Last first, whether or not there are commas. Common second names (Mae, Anne, Grace, Joy…) stay in First Name. Section rows such as “BOYS:” and “GIRLS:” are skipped. Check anything flagged under Review and edit. Missing or invalid LRNs are preserved for correction. Duplicate LRNs are flagged across all selected files. Parent names have no field in the ASTIG template.</p>
+<p>Ten-digit mobile numbers beginning with 9 receive a leading 0. No LRN digits are guessed. Downloads include all listed students, including any unresolved warnings. ASTIG may reject invalid records. Select the grade and section in ASTIG when importing. Save older .xls files as .xlsx in Excel first.</p>
 </details>
 </main>
-<script src="https://cdn.jsdelivr.net/npm/jszip@3.10.1/dist/jszip.min.js"></script><script>
+<script src="https://cdn.jsdelivr.net/npm/jszip@3.10.1/dist/jszip.min.js"></script>
+<script>
 /* ASTIG conversion: XLSX ZIP/XML input and output. No network or persistence. */
 (() => {
 const HEADERS=['LRN','First Name','Middle Name','Last Name','Extension','Parent Mobile No','Parent Email'];
-const clean=v=>String(v??'').replace(/_x000D_/g,' ').replace(/\s+/g,' ').trim();
+
+/* ---------- small helpers ---------- */
+const clean=v=>String(v??'').replace(/_x000D_/gi,' ').replace(/\s+/g,' ').trim();
 const norm=v=>clean(v).toLowerCase().replace(/[^a-z0-9]/g,'');
+const up=s=>String(s||'').replace(/\./g,'').toUpperCase();
 const xml=s=>{const d=new DOMParser().parseFromString(s,'application/xml');if(d.getElementsByTagName('parsererror').length)throw Error('Invalid worksheet XML.');return d;};
 const tags=(n,t)=>Array.from(n.getElementsByTagNameNS('*',t));
-const text=n=>tags(n,'t').map(t=>t.textContent).join('');
+const inPhonetic=t=>{for(let p=t.parentNode;p;p=p.parentNode)if(p.localName==='rPh')return true;return false;};
+const text=n=>tags(n,'t').filter(t=>!inPhonetic(t)).map(t=>t.textContent).join('');
 const esc=v=>String(v??'').replace(/[\x00-\x08\x0B\x0C\x0E-\x1F]/g,'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
 const col=i=>{let s='';for(i++;i;i=Math.floor((i-1)/26))s=String.fromCharCode(65+(i-1)%26)+s;return s;};
 const idx=s=>[...s.toUpperCase()].reduce((n,c)=>n*26+c.charCodeAt(0)-64,0)-1;
-function splitName(value,order){
- let name=clean(value).replace(/^\d+[.)]\s*/,''),ext='',notes=[];
+
+/* ---------- name splitting ---------- */
+const PARTICLES=new Set(['DE','DEL','DELA','DELOS','DELAS','DI','DA','LA','LAS','LOS','SAN','SANTA','VAN','VON']);
+/* Usually the 2nd half of a first name ("Ella MAE", "Mary GRACE") - not treated as a middle name when guessing. */
+const SECOND_NAMES=new Set(['MAE','MAY','ANNE','ANN','ROSE','JOY','JANE','GRACE','MARIE','MARI','LYNN','LYN','CLAIRE','CLARE','FAITH','HOPE','LOVE','MARIA','LOUISE','ELAINE','KATE','JOHN','JAMES','PAUL','MARK','ANTHONY','ANDREW','LUIS','JOSEPH','MICHAEL','CARL','KIM','LEE','JAKE','JAY','RYAN','DALE','CJ','ISABEL','ISABELLE','ANGEL','JEAN','JOAN','LOUIE','KEITH','VINCENT','NOEL','LEO']);
+const isInitial=t=>/^[A-Za-zÑñ]\.?$/.test(t);
+const isSuffix=t=>/^(jr|sr|ii|iii|iv)\.?,?$/i.test(t);
+const noMiddle=m=>/^(-+|n\/?a|none|nmn|no middle name)$/i.test(m);
+
+function givenSplit(tokens,guess,notes){
+ const t=[...tokens];let mid='';
+ if(t.length>1&&isInitial(t.at(-1)))mid=t.pop();
+ else if(guess&&t.length>1&&!SECOND_NAMES.has(up(t.at(-1))))mid=t.pop();
+ else if(t.length>=3)notes.push('Check whether the last word is a middle name.');
+ return [t.join(' '),mid];
+}
+
+/* o = {order:'last'|'first', explicit:boolean, guess:boolean} */
+function splitName(value,o={}){
+ const notes=[];let ext='';
+ let name=clean(value).replace(/^\d+\s*[.)]\s*/,'');
  if(/\(modular\)/i.test(name)){notes.push('Enrollment note “modular” omitted from name.');name=name.replace(/\s*\(modular\)/gi,'');}
- name=name.replace(/\b(Jr\.?|Sr\.?|II|III|IV)\b\.?/gi,m=>{ext=/^jr/i.test(m)?'Jr.':/^sr/i.test(m)?'Sr.':m.toUpperCase();return '';});
- const parts=name.split(',').map(clean).filter(Boolean);let first='',middle='',last='';
- if(parts.length>=3){[last,first]=parts;middle=parts.slice(2).join(' ');if(parts.length>3)notes.push('Check extra commas in the original name.');}
- else {
-  notes.push('Confirm first/middle/last name split; source separators are incomplete.');
-  if(parts.length===2){last=parts[0];const t=parts[1].split(' ');if(t.length>1)middle=t.pop();first=t.join(' ');}
-  else {const t=clean(name).split(' ');if(t.length<2){first=t[0]||'';notes.push('Last name is missing.');}
-   else if(order==='last'){last=t.shift();if(t.length>1)middle=t.pop();first=t.join(' ');}
-   else {last=t.pop();if(/^(DE|DEL|DELA|SAN|SANTA)$/i.test(t.at(-1)||''))last=t.pop()+' '+last;if(t.length>1)middle=t.pop();first=t.join(' ');}
-  }
+ name=clean(name.replace(/\s+[-–—]+\s*(?=,|$)/g,'')).replace(/^[\s,;:\-–—]+|[\s,;:\-–—]+$/g,'');
+ let parts=name.split(',').map(clean).filter(Boolean);
+ /* pull Jr./Sr./II/III/IV out wherever they sit */
+ parts=parts.map((p,pi)=>{
+   const toks=p.split(' ').filter(Boolean);
+   if(pi>0&&toks.length===1&&isSuffix(toks[0])){ext=ext||toks[0].replace(/,$/,'');return '';}
+   return toks.filter((t,i)=>{if(i>0&&isSuffix(t)){ext=ext||t.replace(/,$/,'');return false;}return true;}).join(' ');
+ }).filter(Boolean);
+ if(ext)ext=/^jr/i.test(ext)?'Jr.':/^sr/i.test(ext)?'Sr.':ext.replace(/\./g,'').toUpperCase();
+
+ let first='',middle='',last='';
+ if(parts.length>=3){
+   last=parts[0];first=parts[1];middle=parts.slice(2).join(' ');
+   if(parts.length>3)notes.push('Check extra commas in the original name.');
+ }else if(parts.length===2){
+   last=parts[0];[first,middle]=givenSplit(parts[1].split(' '),o.guess,notes);
+ }else if(parts.length===1){
+   const tk=parts[0].split(' ').filter(Boolean);
+   if(tk.length<2){first=tk[0]||'';notes.push('Last name is missing.');}
+   else{
+     let ord=o.order==='last'?'last':'first';
+     if(isInitial(tk.at(-1)))ord='last';          /* nobody's surname is a single initial */
+     let rest;
+     if(ord==='last'){let k=1;while(k<tk.length-1&&PARTICLES.has(up(tk[k-1])))k++;last=tk.slice(0,k).join(' ');rest=tk.slice(k);}
+     else{let k=tk.length-1;while(k>1&&PARTICLES.has(up(tk[k-1])))k--;last=tk.slice(k).join(' ');rest=tk.slice(0,k);}
+     [first,middle]=givenSplit(rest,o.guess,notes);
+     if(!o.explicit)notes.push('Name has no comma; confirm the first/middle/last split.');
+   }
  }
- if(middle==='-')middle='';
+ if(noMiddle(middle))middle='';
  return {fields:[first,middle,last,ext],notes};
 }
-function detect(rows){
- for(let i=0;i<Math.min(rows.length,30);i++){
-  const h=rows[i].map(norm),find=fn=>h.findIndex(fn);
-  const lrn=find(x=>x==='lrn'||x==='learnerreferencenumber');
-  const full=find(x=>x==='name'||x==='studentname'||x.startsWith('nameofstudent'));
-  const first=find(x=>x==='firstname'),last=find(x=>x==='lastname');
-  if(lrn>=0&&(full>=0||(first>=0&&last>=0)))return {row:i,lrn,full,first,last,middle:find(x=>x==='middlename'),ext:find(x=>x==='extension'||x==='suffix'||x==='nameextension'),phone:find(x=>x==='parentmobileno'||x==='parentmobilenumber'||x==='phonenumberparent'||x==='parentphone'),email:find(x=>x==='parentemail'||x.startsWith('emailaddressofparent')),lastFirst:full>=0&&/last\s*name.*first\s*name/i.test(rows[i][full])};
- }return null;
+
+/* ---------- value formatting ---------- */
+function fmtLrn(v){return clean(v).replace(/[\s'’`]/g,'');}
+function fmtPhone(v,notes){
+ let s=clean(v);if(!s)return '';
+ const pieces=s.split(/\s*(?:\/|;|,|&|\bor\b)\s*/i).filter(Boolean);
+ if(pieces.length>1)notes.push('Several parent numbers were listed; kept the first.');
+ s=pieces[0]||'';
+ const d=s.replace(/[^\d+]/g,'');
+ let m;
+ if(/^09\d{9}$/.test(d))return d;
+ if(/^9\d{9}$/.test(d))return '0'+d;
+ if((m=d.match(/^\+?63(9\d{9})$/)))return '0'+m[1];
+ return s;
 }
-async function readWorkbook(buffer,filename,order='auto'){
+
+/* ---------- reading cells ---------- */
+function cellValue(c,shared){
+ const type=c.getAttribute('t'),vEl=tags(c,'v')[0],v=vEl?vEl.textContent:'';
+ if(type==='s')return shared[Number(v)]??'';
+ if(type==='inlineStr')return text(c);
+ if(type==='b')return v==='1'?'TRUE':'FALSE';
+ if(type==='e')return '';
+ if(type==='str')return v;
+ if(/^-?\d+(\.\d+)?[eE][+-]?\d+$/.test(v)){const n=Number(v);if(Number.isSafeInteger(n))return String(n);}   /* 1.22E11 -> 122000000000 */
+ if(/^-?\d+\.0+$/.test(v))return v.replace(/\.0+$/,'');
+ return v;
+}
+
+/* ---------- header detection ---------- */
+const isParent=h=>/parent|guardian|mother|father|mom|dad/.test(h);
+const NAME_PARTS=/^(firstname|lastname|middlename|givenname|surname|familyname|nameextension|extensionname|suffix)/;
+function detect(rows){
+ let best=null;
+ for(let i=0;i<Math.min(rows.length,40);i++){
+  const raw=rows[i],h=raw.map(norm);
+  const find=fn=>h.findIndex((x,j)=>x&&fn(x,j));
+  const pick=pred=>{const c=[];h.forEach((x,j)=>{if(x&&pred(x))c.push(j);});return c.find(j=>isParent(h[j]))??c[0]??-1;};
+  const lrn=find(x=>x==='lrn'||x.includes('learnerreference')||(x.startsWith('lrn')&&x.length<=12));
+  const first=find(x=>['firstname','givenname','first','fname'].includes(x));
+  const last=find(x=>['lastname','surname','familyname','last','lname'].includes(x));
+  const middle=find(x=>['middlename','middle','mi','middleinitial'].includes(x));
+  const ext=find(x=>['extension','suffix','nameextension','extname'].includes(x));
+  const full=find((x,j)=>x.includes('name')&&!isParent(x)&&!NAME_PARTS.test(x)&&!x.includes('school')&&!/^\d+[.)]/.test(clean(raw[j]))&&clean(raw[j]).length<=90);
+  const email=pick(x=>x.includes('mail'));
+  const phone=pick(x=>!x.includes('mail')&&(x.includes('phone')||x.includes('mobile')||x.includes('contact')||x.includes('cell')));
+  if(!(full>=0||(first>=0&&last>=0)))continue;
+  const useFull=!(first>=0&&last>=0);
+  const m={row:i,lrn,full:useFull?full:-1,first,last,middle,ext,phone,email};
+  if(useFull){
+    const label=String(raw[full]||'');
+    m.lastFirst=/(last\s*name|surname|family\s*name)[\s\S]*(first\s*name|given)/i.test(label);
+    m.headerHasMiddle=/middle/i.test(label);
+  }
+  m.score=[lrn,phone,email,middle,ext].filter(x=>x>=0).length+2;
+  if(!best||m.score>best.score)best=m;
+ }
+ return best;
+}
+
+function resolveOrder(map,rows,order){
+ if(order==='first'||order==='last')return {order,explicit:true};
+ if(map.lastFirst)return {order:'last',explicit:true};
+ /* heading is silent: look at the data - mostly commas means a comma got missed */
+ const names=rows.map(r=>clean(r[map.full])).filter(n=>n.split(' ').length>1);
+ const withComma=names.filter(n=>n.includes(',')).length;
+ return {order:names.length&&withComma*2>=names.length?'last':'first',explicit:false};
+}
+
+const norm_path=p=>{const out=[];for(const s of p.split('/')){if(s==='..')out.pop();else if(s&&s!=='.')out.push(s);}return out.join('/');};
+
+/* ---------- workbook reading ---------- */
+async function readWorkbook(buffer,filename,opts={}){
+ const order=opts.order||'auto',middleMode=opts.middle||'auto';
  const zip=await JSZip.loadAsync(buffer);let expanded=0;
  for(const e of Object.values(zip.files)){expanded+=e._data?.uncompressedSize||0;if(expanded>100*1024*1024)throw Error('Workbook is too large after decompression (100 MB limit).');}
- const read=async p=>{const f=zip.file(p);if(!f)throw Error('Missing XLSX component: '+p);return xml(await f.async('string'));};
+ const getFile=p=>zip.file(p)||Object.values(zip.files).find(f=>f.name.toLowerCase()===p.toLowerCase())||null;
+ const read=async p=>{const f=getFile(p);if(!f)throw Error('Missing XLSX component: '+p);return xml(await f.async('string'));};
  const wb=await read('xl/workbook.xml'),rels=await read('xl/_rels/workbook.xml.rels');
  const paths=new Map(tags(rels,'Relationship').filter(r=>r.getAttribute('TargetMode')!=='External').map(r=>[r.getAttribute('Id'),r.getAttribute('Target')]));
- const shared=zip.file('xl/sharedStrings.xml')?tags(await read('xl/sharedStrings.xml'),'si').map(text):[];
- const output=[],skipped=[];
+ const shared=getFile('xl/sharedStrings.xml')?tags(await read('xl/sharedStrings.xml'),'si').map(text):[];
+ const found=[],skipped=[],diagnostics=[];
+
  for(const sh of tags(wb,'sheet')){
-  const id=sh.getAttribute('r:id')||sh.getAttributeNS('http://schemas.openxmlformats.org/officeDocument/2006/relationships','id');
-  const target=paths.get(id);if(!target)continue;
-  const path=target.startsWith('/')?target.slice(1):'xl/'+target.replace(/^\.\//,'');
-  const sheet=await read(path),rows=[];
-  for(const row of tags(sheet,'row')){
-   const ri=Number(row.getAttribute('r'))-1;if(ri<0||ri>100000)throw Error('Worksheet has too many rows.');
-   const vals=[];
-   for(const c of tags(row,'c')){const addr=c.getAttribute('r')||'',ci=idx(addr.replace(/[0-9]/g,''));if(ci<0||ci>1000)continue;const type=c.getAttribute('t'),v=tags(c,'v')[0]?.textContent??'';vals[ci]=type==='s'?(shared[Number(v)]??''):type==='inlineStr'?text(c):v;}
-   rows[ri]=vals;
-  }
-  for(let i=0;i<rows.length;i++)rows[i]??=[];
-  const map=detect(rows);if(!map){skipped.push(sh.getAttribute('name'));continue;}
-  const records=[];
-  for(let i=map.row+1;i<rows.length;i++){
-   const r=rows[i],get=c=>c<0?'':clean(r[c]),name=map.full>=0?get(map.full):[get(map.first),get(map.middle),get(map.last),get(map.ext)].filter(Boolean).join(' ');
-   if(!name&&!get(map.lrn))continue;if(/^(boys|girls|male|female|total|total students)$/i.test(name)&&!get(map.lrn))continue;
-   if(norm(get(map.lrn))==='lrn')continue;
-   const parsed=map.full>=0?splitName(name,order==='auto'?(map.lastFirst?'last':'first'):order):{fields:[get(map.first),get(map.middle),get(map.last),get(map.ext)],notes:[]};
-   let phone=get(map.phone);if(/^9\d{9}$/.test(phone))phone='0'+phone;
-   records.push({sourceRow:i+1,sourceName:name,fields:[get(map.lrn),...parsed.fields,phone,get(map.email)],notes:parsed.notes,confirmed:false});
-  }
-  if(records.length)output.push({filename,sheet:sh.getAttribute('name'),records});else skipped.push(sh.getAttribute('name')+' (no students)');
+  const sheetName=sh.getAttribute('name')||'Sheet';
+  try{
+   if(sh.getAttribute('state')==='veryHidden')continue;
+   if(/^(instructions?|read ?me|notes?|help|guide)$/i.test(sheetName.trim())){skipped.push(sheetName+' (instructions sheet)');continue;}
+   const id=sh.getAttribute('r:id')||sh.getAttributeNS('http://schemas.openxmlformats.org/officeDocument/2006/relationships','id');
+   const target=paths.get(id);if(!target){skipped.push(sheetName+' (cannot locate sheet data)');continue;}
+   const path=target.startsWith('/')?norm_path(target):target.startsWith('xl/')?norm_path(target):norm_path('xl/'+target);
+   const sheet=await read(path),sparse=[];
+   let prevRow=-1;
+   for(const row of tags(sheet,'row')){
+    const ri=row.hasAttribute('r')?Number(row.getAttribute('r'))-1:prevRow+1;prevRow=ri;
+    if(!(ri>=0&&ri<200000))throw Error('Worksheet has too many rows.');
+    const vals=[];let prevCol=-1;
+    for(const c of tags(row,'c')){
+     const addr=c.getAttribute('r')||'',ci=addr?idx(addr.replace(/[0-9]/g,'')):prevCol+1;prevCol=ci;
+     if(ci<0||ci>1000)continue;
+     vals[ci]=cellValue(c,shared);
+    }
+    sparse[ri]=vals;
+   }
+   /* make every row a dense array: empty cells become '' (sparse holes caused "undefined" crashes) */
+   const rows=Array.from({length:sparse.length},(_,i)=>Array.from(sparse[i]||[],v=>v??''));
+
+   const map=detect(rows);
+   if(!map){
+    const firstRow=rows.find(r=>r.some(v=>clean(v)))||[];
+    diagnostics.push(sheetName+': no heading with a student name found (first row seen: '+firstRow.map(clean).filter(Boolean).slice(0,8).join(' | ')+')');
+    skipped.push(sheetName+' (no name column)');continue;
+   }
+   const get=(r,c)=>c==null||c<0?'':clean(r[c]);
+   const ord=map.full>=0?resolveOrder(map,rows.slice(map.row+1),order):null;
+   const guess=middleMode==='on'?true:middleMode==='off'?false:!!(map.lastFirst&&map.headerHasMiddle);
+   const records=[];
+
+   for(let i=map.row+1;i<rows.length;i++){
+    const r=rows[i];
+    const name=map.full>=0?get(r,map.full):[get(r,map.first),get(r,map.middle),get(r,map.last),get(r,map.ext)].filter(Boolean).join(' ');
+    const lrn=fmtLrn(get(r,map.lrn)),phoneRaw=get(r,map.phone),emailRaw=get(r,map.email);
+    if(!name&&!lrn)continue;
+    if(norm(lrn)==='lrn')continue;                                    /* repeated heading row */
+    if(!lrn&&!phoneRaw&&!emailRaw){
+      const label=name.replace(/[^A-Za-z ]/g,' ').trim();
+      if(!name.includes(',')&&(label.split(/\s+/).length<=1||/^(boys?|girls?|males?|females?|total|section|grade)\b/i.test(label)))continue;   /* "BOYS:", "GIRLS" */
+    }
+    const notes=[];
+    const parsed=map.full>=0
+      ?splitName(name,{order:ord.order,explicit:ord.explicit,guess})
+      :{fields:[get(r,map.first),get(r,map.middle)&&noMiddle(get(r,map.middle))?'':get(r,map.middle),get(r,map.last),get(r,map.ext)],notes:[]};
+    notes.push(...parsed.notes);
+    const phone=fmtPhone(phoneRaw,notes);
+    let email=emailRaw.replace(/^mailto:/i,'').trim();
+    if(email&&!/^[^\s@,;]+@[^\s@,;]+\.[^\s@,;]+$/.test(email)){
+      const m=email.match(/[^\s@,;]+@[^\s@,;]+\.[^\s@,;]+/);          /* "me@x.com / mom@x.com" -> first address */
+      if(m){notes.push('Several or messy email entries; kept '+m[0]+'.');email=m[0];}
+      else{notes.push('Parent email “'+email+'” is not an email address and was left blank.');email='';}
+    }
+    records.push({sourceRow:i+1,sourceName:name,fields:[lrn,...parsed.fields,phone,email],notes,confirmed:false});
+   }
+   if(records.length)found.push({filename,sheet:sheetName,records,hasLrn:map.lrn>=0});
+   else skipped.push(sheetName+' (no students)');
+  }catch(e){skipped.push(sheetName+' ('+e.message+')');}
  }
- if(!output.length)throw Error('No student list found. Required headings: Name (or First Name + Last Name) and LRN.');
+
+ /* If some sheets have an LRN column, ignore the ones that do not (e.g. an "address" sheet). */
+ let output=found;
+ if(found.some(g=>g.hasLrn)){
+  output=found.filter(g=>g.hasLrn);
+  for(const g of found)if(!g.hasLrn)skipped.push(g.sheet+' (no LRN column)');
+ }
+ if(!output.length){
+  const empty=skipped.filter(x=>/no students/.test(x));
+  if(empty.length&&!diagnostics.length)throw Error('This file has the right headings but no student rows ('+empty.join(', ')+'). Is it the blank template?');
+  throw Error('No student list found. Required headings: Name (or First Name + Last Name). '+diagnostics.join(' ; '));
+ }
  return {output,skipped};
 }
+
+/* ---------- checks ---------- */
 function warnings(record,counts){
  const [lrn,first,,last,,phone,email]=record.fields,out=[];
  if(!lrn)out.push('Missing LRN');else if(!/^\d{12}$/.test(lrn))out.push('LRN must have exactly 12 digits');
@@ -101,6 +292,8 @@ function warnings(record,counts){
  if(email&&!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email))out.push('Check parent email');
  if(!record.confirmed)out.push(...record.notes);return out;
 }
+
+/* ---------- writing the ASTIG workbook ---------- */
 async function makeXlsx(records){
  const zip=new JSZip(),ns='http://schemas.openxmlformats.org/spreadsheetml/2006/main';
  const sheet=rows=>'<?xml version="1.0" encoding="UTF-8" standalone="yes"?><worksheet xmlns="'+ns+'"><sheetViews><sheetView workbookViewId="0"><pane ySplit="1" topLeftCell="A2" activePane="bottomLeft" state="frozen"/></sheetView></sheetViews><cols><col min="1" max="7" width="28" customWidth="1"/></cols><sheetData>'+rows.map((row,i)=>'<row r="'+(i+1)+'">'+row.map((v,j)=>'<c r="'+col(j)+(i+1)+'" t="inlineStr"><is><t xml:space="preserve">'+esc(v)+'</t></is></c>').join('')+'</row>').join('')+'</sheetData></worksheet>';
@@ -114,30 +307,99 @@ async function makeXlsx(records){
 }
 window.Astig={HEADERS,readWorkbook,makeXlsx,warnings,splitName};
 })();
-
-</script><script>
+</script>
+<script>
 const $=id=>document.getElementById(id);let groups=[],busy=false,views=[];
-const el=(tag,text)=>{const n=document.createElement(tag);if(text!==undefined)n.textContent=text;return n;};
+const el=(tag,text,cls)=>{const n=document.createElement(tag);if(text!==undefined)n.textContent=text;if(cls)n.className=cls;return n;};
+
+function loadScript(src){return new Promise((res,rej)=>{const s=document.createElement('script');s.src=src;s.onload=res;s.onerror=()=>rej(new Error('Could not load '+src));document.head.append(s);});}
+async function ensureJSZip(){
+ if(window.JSZip)return true;
+ for(const url of ['https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js','https://unpkg.com/jszip@3.10.1/dist/jszip.min.js']){
+  try{await loadScript(url);if(window.JSZip)return true;}catch(e){}
+ }
+ return false;
+}
+
 function counts(){const c=new Map();for(const g of groups)for(const r of g.records){const id=r.fields[0];if(id)c.set(id,(c.get(id)||0)+1);}return c;}
-function refresh(){const c=counts();let total=0;for(const v of views){let flagged=0;for(const item of v.rows){const messages=Astig.warnings(item.record,c);item.warning.textContent=messages.join('; ');if(messages.length)flagged++;}v.summary.textContent=`${v.group.records.length} students. ${flagged} rows need review.`;total+=flagged;}return total;}
+function refresh(){const c=counts();let total=0;for(const v of views){let flagged=0;for(const item of v.rows){const messages=Astig.warnings(item.record,c);item.warning.textContent=messages.join('; ');item.warning.className=messages.length?'warn':'ok';if(!messages.length)item.warning.textContent='OK';if(messages.length)flagged++;}v.summary.textContent=`${v.group.records.length} students. ${flagged} rows need review.`;total+=flagged;}return total;}
 function download(bytes,name,type){const url=URL.createObjectURL(new Blob([bytes],{type})),a=el('a');a.href=url;a.download=name;document.body.append(a);a.click();a.remove();setTimeout(()=>URL.revokeObjectURL(url),60000);}
 const safe=s=>s.replace(/[<>:"/\\|?*\x00-\x1f]/g,'_');
-function outputName(g,i){return safe(g.filename.replace(/\.xlsx$/i,'')+(groups.filter(x=>x.filename===g.filename).length>1?'_'+g.sheet:'')+'_'+(i+1)+'_ASTIG_Bulk_Import.xlsx');}
+function outputName(g,i){return safe(g.filename.replace(/\.xlsx?m?$/i,'')+(groups.filter(x=>x.filename===g.filename).length>1?'_'+g.sheet:'')+'_'+(i+1)+'_ASTIG_Bulk_Import.xlsx');}
 function report(){const c=counts(),lines=['ASTIG conversion review','Downloads include all rows, including unresolved issues. Select the grade and section in ASTIG.',''];groups.forEach(g=>{lines.push(g.filename+' / '+g.sheet);g.records.forEach(r=>{const w=Astig.warnings(r,c);if(w.length)lines.push('Source row '+r.sourceRow+' — '+r.sourceName+': '+w.join('; '));});lines.push('');});return lines.join('\r\n');}
-function render(){views=[];$('results').replaceChildren();groups.forEach((g,i)=>{
- const section=el('section'),heading=el('h2',g.filename+' — '+g.sheet),summary=el('p'),button=el('button','Download ASTIG Excel'),details=el('details'),label=el('summary','Review and edit names, LRNs and contacts');
- button.type='button';button.onclick=async()=>{button.disabled=true;try{download(await Astig.makeXlsx(g.records),outputName(g,i),'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');}catch(e){$('status').textContent='Download failed: '+e.message;}finally{button.disabled=false;}};
- details.append(label,el('p','Edit any field below. “Name checked” acknowledges name-splitting notes only; it does not dismiss LRN or contact problems.'));
- const table=el('table'),head=el('tr');['Source row','Original name',...Astig.HEADERS,'Name checked','Warnings'].forEach(h=>head.append(el('th',h)));const thead=el('thead');thead.append(head);table.append(thead);const tbody=el('tbody'),rows=[];
- for(const record of g.records){const tr=el('tr');tr.append(el('td',record.sourceRow),el('td',record.sourceName));record.fields.forEach((value,j)=>{const td=el('td'),input=el('input');input.type='text';input.value=value;input.size=j===6?25:18;input.setAttribute('aria-label',`${g.filename} row ${record.sourceRow} ${Astig.HEADERS[j]}`);input.oninput=()=>{record.fields[j]=input.value.trim();refresh();};td.append(input);tr.append(td);});const td=el('td'),check=el('input');check.type='checkbox';check.setAttribute('aria-label',`Name checked for ${record.sourceName}`);check.onchange=()=>{record.confirmed=check.checked;refresh();};td.append(check);tr.append(td);const warning=el('td');tr.append(warning);tbody.append(tr);rows.push({record,warning});}table.append(tbody);details.append(table);section.append(heading,summary,button,details);$('results').append(section);views.push({group:g,summary,rows});});refresh();$('download-all').hidden=!groups.length;}
-$('convert').onclick=async()=>{
- if(busy)return;if(!window.JSZip){$('status').textContent='Excel library failed to load. Check your internet connection and refresh.';return;}const files=[...$('files').files];if(!files.length){$('status').textContent='Choose at least one .xlsx file first.';return;}
- busy=true;$('convert').disabled=true;$('download-all').hidden=true;$('clear').disabled=true;groups=[];$('results').replaceChildren();const errors=[],notes=[];
- try{for(const file of files){$('status').textContent='Converting '+file.name+'…';try{if(!/\.xlsx$/i.test(file.name))throw Error('Only .xlsx files are supported. Use Save As in Excel.');if(file.size>25*1024*1024)throw Error('File exceeds the 25 MB limit.');const result=await Astig.readWorkbook(await file.arrayBuffer(),file.name,$('order').value);groups.push(...result.output);if(result.skipped.length)notes.push(file.name+': skipped '+result.skipped.join(', '));}catch(e){errors.push(file.name+': '+e.message);}}render();$('status').textContent=`Converted ${groups.length} list(s), ${groups.reduce((n,g)=>n+g.records.length,0)} students. ${refresh()} rows need review.`;for(const message of [...errors,...notes])$('results').append(el('p',message));}
- finally{busy=false;$('convert').disabled=false;$('clear').disabled=false;}
-};
-$('download-all').onclick=async()=>{const button=$('download-all');button.disabled=true;try{const zip=new JSZip();for(let i=0;i<groups.length;i++)zip.file(outputName(groups[i],i),await Astig.makeXlsx(groups[i].records));zip.file('REVIEW_BEFORE_IMPORT.txt',report());download(await zip.generateAsync({type:'uint8array',compression:'DEFLATE'}),'ASTIG_Converted_Files.zip','application/zip');}catch(e){$('status').textContent='Download failed: '+e.message;}finally{button.disabled=false;}};
-$('clear').onclick=()=>{groups=[];views=[];$('files').value='';$('results').replaceChildren();$('download-all').hidden=true;$('status').textContent='No files converted yet.';};
 
+function render(){
+ views=[];$('results').replaceChildren();
+ groups.forEach((g,i)=>{
+  const section=el('section'),heading=el('h2',g.filename+' — '+g.sheet),summary=el('p'),button=el('button','Download ASTIG Excel'),details=el('details'),label=el('summary','Review and edit names, LRNs and contacts');
+  button.type='button';
+  button.onclick=async()=>{button.disabled=true;try{download(await Astig.makeXlsx(g.records),outputName(g,i),'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');}catch(e){$('status').textContent='Download failed: '+e.message;}finally{button.disabled=false;}};
+  details.append(label,el('p','Edit any field below. “Checked” acknowledges name-split notes only; it does not dismiss LRN or contact problems.'));
+  const table=el('table'),head=el('tr');
+  ['Source row','Original name',...Astig.HEADERS,'Checked','Warnings'].forEach(h=>head.append(el('th',h)));
+  const thead=el('thead');thead.append(head);table.append(thead);
+  const tbody=el('tbody'),rows=[];
+  for(const record of g.records){
+   const tr=el('tr');tr.append(el('td',record.sourceRow),el('td',record.sourceName));
+   record.fields.forEach((value,j)=>{const td=el('td'),input=el('input');input.type='text';input.value=value;input.size=j===6?25:18;input.setAttribute('aria-label',`${g.filename} row ${record.sourceRow} ${Astig.HEADERS[j]}`);input.oninput=()=>{record.fields[j]=input.value.trim();refresh();};td.append(input);tr.append(td);});
+   const td=el('td'),check=el('input');check.type='checkbox';check.setAttribute('aria-label',`Checked: ${record.sourceName}`);check.onchange=()=>{record.confirmed=check.checked;refresh();};td.append(check);tr.append(td);
+   const warning=el('td');tr.append(warning);tbody.append(tr);rows.push({record,warning});
+  }
+  table.append(tbody);const wrap=el('div',undefined,'wrap');wrap.append(table);details.append(wrap);
+  section.append(heading,summary,button,details);$('results').append(section);views.push({group:g,summary,rows});
+ });
+ $('results-wrap').hidden=!groups.length;
+ refresh();$('download-all').hidden=!groups.length;
+}
+
+function showMessages(errors,notes){
+ const box=$('messages');box.replaceChildren();
+ for(const m of errors)box.append(el('p','⚠ '+m,'err'));
+ for(const m of notes)box.append(el('p','ℹ '+m));
+ box.hidden=!(errors.length||notes.length);
+}
+
+$('convert').onclick=async()=>{
+ if(busy)return;
+ const files=[...$('files').files];
+ if(!files.length){$('status').textContent='Choose at least one .xlsx file first.';return;}
+ busy=true;$('convert').disabled=true;$('clear').disabled=true;$('download-all').hidden=true;
+ groups=[];$('results').replaceChildren();$('results-wrap').hidden=true;showMessages([],[]);
+ const errors=[],notes=[];
+ try{
+  $('status').textContent='Loading Excel library…';
+  if(!await ensureJSZip()){$('status').textContent='The Excel library could not be loaded. Check your internet connection and refresh.';return;}
+  const opts={order:$('order').value,middle:$('middle').value};
+  for(const file of files){
+   $('status').textContent='Converting '+file.name+'…';
+   try{
+    if(!/\.xls[xm]$/i.test(file.name))throw Error('Only .xlsx files are supported. Open it in Excel and use Save As → Excel Workbook (.xlsx).');
+    if(file.size>25*1024*1024)throw Error('File exceeds the 25 MB limit.');
+    const result=await Astig.readWorkbook(await file.arrayBuffer(),file.name,opts);
+    groups.push(...result.output);
+    if(result.skipped.length)notes.push(file.name+': skipped '+result.skipped.join(', '));
+   }catch(e){errors.push(file.name+': '+(e&&e.message?e.message:String(e)));console.error(file.name,e);}
+  }
+  render();
+  $('status').textContent=`Converted ${groups.length} list(s), ${groups.reduce((n,g)=>n+g.records.length,0)} students. ${refresh()} rows need review.`;
+  showMessages(errors,notes);
+ }catch(e){
+  $('status').textContent='Something went wrong: '+(e&&e.message?e.message:String(e));console.error(e);
+ }finally{busy=false;$('convert').disabled=false;$('clear').disabled=false;}
+};
+
+$('download-all').onclick=async()=>{
+ const button=$('download-all');button.disabled=true;
+ try{
+  const zip=new JSZip();
+  for(let i=0;i<groups.length;i++)zip.file(outputName(groups[i],i),await Astig.makeXlsx(groups[i].records));
+  zip.file('REVIEW_BEFORE_IMPORT.txt',report());
+  download(await zip.generateAsync({type:'uint8array',compression:'DEFLATE'}),'ASTIG_Converted_Files.zip','application/zip');
+ }catch(e){$('status').textContent='Download failed: '+e.message;}
+ finally{button.disabled=false;}
+};
+
+$('clear').onclick=()=>{groups=[];views=[];$('files').value='';$('results').replaceChildren();$('results-wrap').hidden=true;showMessages([],[]);$('download-all').hidden=true;$('status').textContent='No files converted yet.';};
 </script>
-</body></html>
+</body>
+</html>
