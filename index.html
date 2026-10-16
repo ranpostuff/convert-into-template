@@ -23,7 +23,7 @@
 <body>
 <main>
 <h1>ASTIG Excel Converter</h1>
-<p>Choose your Excel class lists, press Convert, then download the ASTIG files.</p>
+<p>Choose your Excel class lists, press Convert, pick the folder where you want the files saved, then download the ASTIG files.</p>
 <p>Your student data stays in this browser. Files are not sent to a server. Internet is needed to load the conversion library.</p>
 <p><label>Excel files (.xlsx): <input id="files" type="file" accept=".xlsx,.xlsm" multiple></label></p>
 <p><label>Names without commas:
@@ -39,15 +39,17 @@
     <option value="off">Keep everything in First Name</option>
   </select></label></p>
 <p><button id="convert" type="button">Convert</button> <button id="clear" type="button">Clear</button></p>
+<p id="folder" aria-live="polite"></p>
 <p id="status" role="status" aria-live="polite">No files converted yet.</p>
 <section id="messages" aria-label="Messages" hidden></section>
 <section id="results-wrap" hidden><div id="results" aria-label="Converted files"></div></section>
-<p><button id="download-all" type="button" hidden>Download all as ZIP</button></p>
+<p><button id="download-all" type="button" hidden>Download all as ZIP</button> <button id="change-folder" type="button" hidden>Change folder</button></p>
 <details><summary>Supported format and important notes</summary>
 <p>Accepts the class-list format with student name, parent name, parent email, parent phone and LRN; a two-column Name / LRN list; separate First / Middle / Last columns; or an existing ASTIG file. Blank columns, numbering columns and extra columns are ignored. If a workbook has several sheets, only sheets with an LRN column are converted (so an "address" sheet is skipped); if no sheet has an LRN column, every sheet with names is converted.</p>
 <p>Output columns: LRN, First Name, Middle Name, Last Name, Extension, Parent Mobile No, Parent Email.</p>
 <p>Names are split using the heading: “Last Name, First Name, Middle Name” means Last first, whether or not there are commas. Common second names (Mae, Anne, Grace, Joy…) stay in First Name. Section rows such as “BOYS:” and “GIRLS:” are skipped. Check anything flagged under Review and edit. Missing or invalid LRNs are preserved for correction. Duplicate LRNs are flagged across all selected files. Parent names have no field in the ASTIG template.</p>
 <p>Ten-digit mobile numbers beginning with 9 receive a leading 0. No LRN digits are guessed. Downloads include all listed students, including any unresolved warnings. ASTIG may reject invalid records. Select the grade and section in ASTIG when importing. Save older .xls files as .xlsx in Excel first.</p>
+<p>Choosing a save folder works in Chrome, Edge and other Chromium browsers. In browsers without this feature (Firefox, Safari), files go to your normal Downloads folder instead; turn on “Ask where to save each file” in your browser settings if you want a prompt.</p>
 </details>
 </main>
 <script src="https://cdn.jsdelivr.net/npm/jszip@3.10.1/dist/jszip.min.js"></script>
@@ -309,8 +311,9 @@ window.Astig={HEADERS,readWorkbook,makeXlsx,warnings,splitName};
 })();
 </script>
 <script>
-const $=id=>document.getElementById(id);let groups=[],busy=false,views=[];
+const $=id=>document.getElementById(id);let groups=[],busy=false,views=[],dirHandle=null;
 const el=(tag,text,cls)=>{const n=document.createElement(tag);if(text!==undefined)n.textContent=text;if(cls)n.className=cls;return n;};
+const canPickFolder=typeof window.showDirectoryPicker==='function';
 
 function loadScript(src){return new Promise((res,rej)=>{const s=document.createElement('script');s.src=src;s.onload=res;s.onerror=()=>rej(new Error('Could not load '+src));document.head.append(s);});}
 async function ensureJSZip(){
@@ -321,6 +324,37 @@ async function ensureJSZip(){
  return false;
 }
 
+/* ---------- folder picking and saving ---------- */
+function updateFolderLabel(){
+ const f=$('folder');
+ if(dirHandle)f.textContent='Saving to folder: '+dirHandle.name;
+ else if(canPickFolder)f.textContent='No folder chosen. Files will go to your normal Downloads folder.';
+ else f.textContent='This browser cannot choose a folder. Files will go to your normal Downloads folder.';
+ $('download-all').textContent=dirHandle?'Save all to folder':'Download all as ZIP';
+ $('change-folder').hidden=!(canPickFolder&&groups.length);
+}
+/* Must be called straight from a click so the browser allows the picker. */
+async function pickFolder(){
+ if(!canPickFolder)return 'unsupported';
+ try{dirHandle=await window.showDirectoryPicker({id:'astig-output',mode:'readwrite'});return 'ok';}
+ catch(e){return e&&e.name==='AbortError'?'cancelled':'error';}
+}
+async function saveFile(bytes,name,type){
+ if(dirHandle){
+  try{
+   const handle=await dirHandle.getFileHandle(name,{create:true});
+   const writable=await handle.createWritable();
+   await writable.write(bytes);await writable.close();
+   return 'Saved '+name+' to folder “'+dirHandle.name+'”.';
+  }catch(e){
+   console.error(e);dirHandle=null;updateFolderLabel();
+   /* fall through to a normal download */
+  }
+ }
+ download(bytes,name,type);
+ return 'Downloaded '+name+' to your Downloads folder.';
+}
+
 function counts(){const c=new Map();for(const g of groups)for(const r of g.records){const id=r.fields[0];if(id)c.set(id,(c.get(id)||0)+1);}return c;}
 function refresh(){const c=counts();let total=0;for(const v of views){let flagged=0;for(const item of v.rows){const messages=Astig.warnings(item.record,c);item.warning.textContent=messages.join('; ');item.warning.className=messages.length?'warn':'ok';if(!messages.length)item.warning.textContent='OK';if(messages.length)flagged++;}v.summary.textContent=`${v.group.records.length} students. ${flagged} rows need review.`;total+=flagged;}return total;}
 function download(bytes,name,type){const url=URL.createObjectURL(new Blob([bytes],{type})),a=el('a');a.href=url;a.download=name;document.body.append(a);a.click();a.remove();setTimeout(()=>URL.revokeObjectURL(url),60000);}
@@ -328,12 +362,14 @@ const safe=s=>s.replace(/[<>:"/\\|?*\x00-\x1f]/g,'_');
 function outputName(g,i){return safe(g.filename.replace(/\.xlsx?m?$/i,'')+(groups.filter(x=>x.filename===g.filename).length>1?'_'+g.sheet:'')+'_'+(i+1)+'_ASTIG_Bulk_Import.xlsx');}
 function report(){const c=counts(),lines=['ASTIG conversion review','Downloads include all rows, including unresolved issues. Select the grade and section in ASTIG.',''];groups.forEach(g=>{lines.push(g.filename+' / '+g.sheet);g.records.forEach(r=>{const w=Astig.warnings(r,c);if(w.length)lines.push('Source row '+r.sourceRow+' — '+r.sourceName+': '+w.join('; '));});lines.push('');});return lines.join('\r\n');}
 
+const XLSX_TYPE='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet';
+
 function render(){
  views=[];$('results').replaceChildren();
  groups.forEach((g,i)=>{
   const section=el('section'),heading=el('h2',g.filename+' — '+g.sheet),summary=el('p'),button=el('button','Download ASTIG Excel'),details=el('details'),label=el('summary','Review and edit names, LRNs and contacts');
   button.type='button';
-  button.onclick=async()=>{button.disabled=true;try{download(await Astig.makeXlsx(g.records),outputName(g,i),'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');}catch(e){$('status').textContent='Download failed: '+e.message;}finally{button.disabled=false;}};
+  button.onclick=async()=>{button.disabled=true;try{$('status').textContent=await saveFile(await Astig.makeXlsx(g.records),outputName(g,i),XLSX_TYPE);}catch(e){$('status').textContent='Download failed: '+e.message;}finally{button.disabled=false;}};
   details.append(label,el('p','Edit any field below. “Checked” acknowledges name-split notes only; it does not dismiss LRN or contact problems.'));
   const table=el('table'),head=el('tr');
   ['Source row','Original name',...Astig.HEADERS,'Checked','Warnings'].forEach(h=>head.append(el('th',h)));
@@ -349,7 +385,7 @@ function render(){
   section.append(heading,summary,button,details);$('results').append(section);views.push({group:g,summary,rows});
  });
  $('results-wrap').hidden=!groups.length;
- refresh();$('download-all').hidden=!groups.length;
+ refresh();$('download-all').hidden=!groups.length;updateFolderLabel();
 }
 
 function showMessages(errors,notes){
@@ -364,8 +400,13 @@ $('convert').onclick=async()=>{
  const files=[...$('files').files];
  if(!files.length){$('status').textContent='Choose at least one .xlsx file first.';return;}
  busy=true;$('convert').disabled=true;$('clear').disabled=true;$('download-all').hidden=true;
+ /* Ask for the save folder first, while the click is still fresh. */
+ const picked=await pickFolder();
+ const folderNote=picked==='cancelled'?'No folder chosen, so files will go to your normal Downloads folder.':picked==='error'?'Could not open the folder picker, so files will go to your normal Downloads folder.':'';
+ updateFolderLabel();
  groups=[];$('results').replaceChildren();$('results-wrap').hidden=true;showMessages([],[]);
  const errors=[],notes=[];
+ if(folderNote)notes.push(folderNote);
  try{
   $('status').textContent='Loading Excel library…';
   if(!await ensureJSZip()){$('status').textContent='The Excel library could not be loaded. Check your internet connection and refresh.';return;}
@@ -388,18 +429,33 @@ $('convert').onclick=async()=>{
  }finally{busy=false;$('convert').disabled=false;$('clear').disabled=false;}
 };
 
+$('change-folder').onclick=async()=>{
+ const result=await pickFolder();
+ if(result==='ok')$('status').textContent='Folder changed to “'+dirHandle.name+'”.';
+ updateFolderLabel();
+};
+
 $('download-all').onclick=async()=>{
  const button=$('download-all');button.disabled=true;
  try{
-  const zip=new JSZip();
-  for(let i=0;i<groups.length;i++)zip.file(outputName(groups[i],i),await Astig.makeXlsx(groups[i].records));
-  zip.file('REVIEW_BEFORE_IMPORT.txt',report());
-  download(await zip.generateAsync({type:'uint8array',compression:'DEFLATE'}),'ASTIG_Converted_Files.zip','application/zip');
+  if(dirHandle){
+   let message='';
+   for(let i=0;i<groups.length;i++)message=await saveFile(await Astig.makeXlsx(groups[i].records),outputName(groups[i],i),XLSX_TYPE);
+   await saveFile(report(),'REVIEW_BEFORE_IMPORT.txt','text/plain');
+   $('status').textContent=dirHandle?`Saved ${groups.length} file(s) and REVIEW_BEFORE_IMPORT.txt to folder “${dirHandle.name}”.`:message;
+  }else{
+   const zip=new JSZip();
+   for(let i=0;i<groups.length;i++)zip.file(outputName(groups[i],i),await Astig.makeXlsx(groups[i].records));
+   zip.file('REVIEW_BEFORE_IMPORT.txt',report());
+   download(await zip.generateAsync({type:'uint8array',compression:'DEFLATE'}),'ASTIG_Converted_Files.zip','application/zip');
+  }
  }catch(e){$('status').textContent='Download failed: '+e.message;}
  finally{button.disabled=false;}
 };
 
-$('clear').onclick=()=>{groups=[];views=[];$('files').value='';$('results').replaceChildren();$('results-wrap').hidden=true;showMessages([],[]);$('download-all').hidden=true;$('status').textContent='No files converted yet.';};
+$('clear').onclick=()=>{groups=[];views=[];$('files').value='';$('results').replaceChildren();$('results-wrap').hidden=true;showMessages([],[]);$('download-all').hidden=true;$('change-folder').hidden=true;$('status').textContent='No files converted yet.';};
+
+updateFolderLabel();
 </script>
 </body>
 </html>
