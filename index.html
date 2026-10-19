@@ -15,6 +15,8 @@
   th,td{border:1px solid #8885;padding:2px 4px;text-align:left;vertical-align:top;white-space:nowrap}
   td:last-child{white-space:normal;min-width:16rem}
   th{position:sticky;top:0;background:Canvas}
+  .rename{display:block;margin:.5rem 0}
+  .rename input{width:min(100%,34rem);padding:.3rem .4rem}
   .warn{color:#e8590c}
   .err{color:#e03131}
   .ok{color:#2f9e44}
@@ -23,7 +25,7 @@
 <body>
 <main>
 <h1>ASTIG Excel Converter</h1>
-<p>Choose your Excel class lists, press Convert, pick the folder where you want the files saved, then download the ASTIG files.</p>
+<p>Choose your Excel class lists, press Convert, pick the folder where you want the files saved, then rename and download the ASTIG files.</p>
 <p>Your student data stays in this browser. Files are not sent to a server. Internet is needed to load the conversion library.</p>
 <p><label>Excel files (.xlsx): <input id="files" type="file" accept=".xlsx,.xlsm" multiple></label></p>
 <p><label>Names without commas:
@@ -34,7 +36,7 @@
   </select></label></p>
 <p><label>Middle name when it is not written separately:
   <select id="middle">
-    <option value="auto">Automatic (last word is the middle name if the heading says Last, First, Middle)</option>
+    <option value="auto">Automatic (guess only if the list does not already use middle initials)</option>
     <option value="on">Always treat the last given-name word as the middle name</option>
     <option value="off">Keep everything in First Name</option>
   </select></label></p>
@@ -47,7 +49,7 @@
 <details><summary>Supported format and important notes</summary>
 <p>Accepts the class-list format with student name, parent name, parent email, parent phone and LRN; a two-column Name / LRN list; separate First / Middle / Last columns; or an existing ASTIG file. Blank columns, numbering columns and extra columns are ignored. If a workbook has several sheets, only sheets with an LRN column are converted (so an "address" sheet is skipped); if no sheet has an LRN column, every sheet with names is converted.</p>
 <p>Output columns: LRN, First Name, Middle Name, Last Name, Extension, Parent Mobile No, Parent Email.</p>
-<p>Names are split using the heading: “Last Name, First Name, Middle Name” means Last first, whether or not there are commas. Common second names (Mae, Anne, Grace, Joy…) stay in First Name. Section rows such as “BOYS:” and “GIRLS:” are skipped. Check anything flagged under Review and edit. Missing or invalid LRNs are preserved for correction. Duplicate LRNs are flagged across all selected files. Parent names have no field in the ASTIG template.</p>
+<p>Names are split using the heading: “Last Name, First Name, Middle Name” means Last first, whether or not there are commas. In Automatic mode, if most names already end in a middle initial (like “O.”), no other middle names are guessed. Otherwise common second names (Mae, Anne, Grace, Joy…) stay in First Name. Section rows such as “BOYS:” and “GIRLS:” are skipped. Leftover repeated names with no LRN, phone or email are ignored. Check anything flagged under Review and edit. Missing or invalid LRNs are preserved for correction. Duplicate LRNs are flagged across all selected files. Parent names have no field in the ASTIG template.</p>
 <p>Ten-digit mobile numbers beginning with 9 receive a leading 0. No LRN digits are guessed. Downloads include all listed students, including any unresolved warnings. ASTIG may reject invalid records. Select the grade and section in ASTIG when importing. Save older .xls files as .xlsx in Excel first.</p>
 <p>Choosing a save folder works in Chrome, Edge and other Chromium browsers. In browsers without this feature (Firefox, Safari), files go to your normal Downloads folder instead; turn on “Ask where to save each file” in your browser settings if you want a prompt.</p>
 </details>
@@ -238,7 +240,15 @@ async function readWorkbook(buffer,filename,opts={}){
    }
    const get=(r,c)=>c==null||c<0?'':clean(r[c]);
    const ord=map.full>=0?resolveOrder(map,rows.slice(map.row+1),order):null;
-   const guess=middleMode==='on'?true:middleMode==='off'?false:!!(map.lastFirst&&map.headerHasMiddle);
+
+   /* Automatic: only guess a middle name if the list does not already write middles as initials */
+   let initRatio=0;
+   if(map.full>=0){
+    const given=rows.slice(map.row+1).map(r=>clean(r[map.full]).split(',')[1]||'')
+      .map(s=>s.split(' ').filter(t=>t&&!isSuffix(t))).filter(t=>t.length>1);
+    initRatio=given.length?given.filter(t=>isInitial(t.at(-1))).length/given.length:0;
+   }
+   const guess=middleMode==='on'?true:middleMode==='off'?false:!!(map.lastFirst&&map.headerHasMiddle&&initRatio<0.2);
    const records=[];
 
    for(let i=map.row+1;i<rows.length;i++){
@@ -265,7 +275,17 @@ async function readWorkbook(buffer,filename,opts={}){
     }
     records.push({sourceRow:i+1,sourceName:name,fields:[lrn,...parsed.fields,phone,email],notes,confirmed:false});
    }
-   if(records.length)found.push({filename,sheet:sheetName,records,hasLrn:map.lrn>=0});
+
+   /* Drop leftover repeated names that have no LRN/phone/email and match an earlier student */
+   const seen=new Set(),kept=[];let dropped=0;
+   for(const rec of records){
+    const key=norm(rec.sourceName),empty=!rec.fields[0]&&!rec.fields[5]&&!rec.fields[6];
+    if(empty&&seen.has(key)){dropped++;continue;}
+    seen.add(key);kept.push(rec);
+   }
+   if(dropped)skipped.push(sheetName+' ('+dropped+' repeated name row(s) with no LRN ignored)');
+
+   if(kept.length)found.push({filename,sheet:sheetName,records:kept,hasLrn:map.lrn>=0});
    else skipped.push(sheetName+' (no students)');
   }catch(e){skipped.push(sheetName+' ('+e.message+')');}
  }
@@ -360,6 +380,14 @@ function refresh(){const c=counts();let total=0;for(const v of views){let flagge
 function download(bytes,name,type){const url=URL.createObjectURL(new Blob([bytes],{type})),a=el('a');a.href=url;a.download=name;document.body.append(a);a.click();a.remove();setTimeout(()=>URL.revokeObjectURL(url),60000);}
 const safe=s=>s.replace(/[<>:"/\\|?*\x00-\x1f]/g,'_');
 function outputName(g,i){return safe(g.filename.replace(/\.xlsx?m?$/i,'')+(groups.filter(x=>x.filename===g.filename).length>1?'_'+g.sheet:'')+'_'+(i+1)+'_ASTIG_Bulk_Import.xlsx');}
+/* The name the person typed (or the default), cleaned and always ending in .xlsx */
+function finalName(g,i){
+ let n=safe(String(g.outName||'').trim()).replace(/^\.+/,'');
+ if(!n||/^\.xlsx$/i.test(n))n=outputName(g,i);
+ return /\.xlsx$/i.test(n)?n:n.replace(/\.(xlsm?|xls)$/i,'')+'.xlsx';
+}
+/* Names for every file, adding _2, _3 if two files would share a name */
+function allNames(){const used=new Set();return groups.map((g,i)=>{let n=finalName(g,i);const base=n.replace(/\.xlsx$/i,'');let k=2;while(used.has(n.toLowerCase()))n=base+'_'+(k++)+'.xlsx';used.add(n.toLowerCase());return n;});}
 function report(){const c=counts(),lines=['ASTIG conversion review','Downloads include all rows, including unresolved issues. Select the grade and section in ASTIG.',''];groups.forEach(g=>{lines.push(g.filename+' / '+g.sheet);g.records.forEach(r=>{const w=Astig.warnings(r,c);if(w.length)lines.push('Source row '+r.sourceRow+' — '+r.sourceName+': '+w.join('; '));});lines.push('');});return lines.join('\r\n');}
 
 const XLSX_TYPE='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet';
@@ -367,9 +395,16 @@ const XLSX_TYPE='application/vnd.openxmlformats-officedocument.spreadsheetml.she
 function render(){
  views=[];$('results').replaceChildren();
  groups.forEach((g,i)=>{
+  if(!g.outName)g.outName=outputName(g,i);
   const section=el('section'),heading=el('h2',g.filename+' — '+g.sheet),summary=el('p'),button=el('button','Download ASTIG Excel'),details=el('details'),label=el('summary','Review and edit names, LRNs and contacts');
+  /* rename box */
+  const rename=el('label',undefined,'rename'),nameInput=el('input');
+  rename.append('File name: ');nameInput.type='text';nameInput.value=g.outName;nameInput.setAttribute('aria-label','Output file name for '+g.filename+' '+g.sheet);
+  nameInput.oninput=()=>{g.outName=nameInput.value;};
+  nameInput.onblur=()=>{nameInput.value=finalName(g,i);g.outName=nameInput.value;};
+  rename.append(nameInput);
   button.type='button';
-  button.onclick=async()=>{button.disabled=true;try{$('status').textContent=await saveFile(await Astig.makeXlsx(g.records),outputName(g,i),XLSX_TYPE);}catch(e){$('status').textContent='Download failed: '+e.message;}finally{button.disabled=false;}};
+  button.onclick=async()=>{button.disabled=true;try{nameInput.value=finalName(g,i);g.outName=nameInput.value;$('status').textContent=await saveFile(await Astig.makeXlsx(g.records),g.outName,XLSX_TYPE);}catch(e){$('status').textContent='Download failed: '+e.message;}finally{button.disabled=false;}};
   details.append(label,el('p','Edit any field below. “Checked” acknowledges name-split notes only; it does not dismiss LRN or contact problems.'));
   const table=el('table'),head=el('tr');
   ['Source row','Original name',...Astig.HEADERS,'Checked','Warnings'].forEach(h=>head.append(el('th',h)));
@@ -382,7 +417,7 @@ function render(){
    const warning=el('td');tr.append(warning);tbody.append(tr);rows.push({record,warning});
   }
   table.append(tbody);const wrap=el('div',undefined,'wrap');wrap.append(table);details.append(wrap);
-  section.append(heading,summary,button,details);$('results').append(section);views.push({group:g,summary,rows});
+  section.append(heading,summary,rename,button,details);$('results').append(section);views.push({group:g,summary,rows});
  });
  $('results-wrap').hidden=!groups.length;
  refresh();$('download-all').hidden=!groups.length;updateFolderLabel();
@@ -422,7 +457,7 @@ $('convert').onclick=async()=>{
    }catch(e){errors.push(file.name+': '+(e&&e.message?e.message:String(e)));console.error(file.name,e);}
   }
   render();
-  $('status').textContent=`Converted ${groups.length} list(s), ${groups.reduce((n,g)=>n+g.records.length,0)} students. ${refresh()} rows need review.`;
+  $('status').textContent=`Converted ${groups.length} list(s), ${groups.reduce((n,g)=>n+g.records.length,0)} students. ${refresh()} rows need review. You can rename each file below before downloading.`;
   showMessages(errors,notes);
  }catch(e){
   $('status').textContent='Something went wrong: '+(e&&e.message?e.message:String(e));console.error(e);
@@ -438,14 +473,15 @@ $('change-folder').onclick=async()=>{
 $('download-all').onclick=async()=>{
  const button=$('download-all');button.disabled=true;
  try{
+  const names=allNames();
   if(dirHandle){
    let message='';
-   for(let i=0;i<groups.length;i++)message=await saveFile(await Astig.makeXlsx(groups[i].records),outputName(groups[i],i),XLSX_TYPE);
+   for(let i=0;i<groups.length;i++)message=await saveFile(await Astig.makeXlsx(groups[i].records),names[i],XLSX_TYPE);
    await saveFile(report(),'REVIEW_BEFORE_IMPORT.txt','text/plain');
    $('status').textContent=dirHandle?`Saved ${groups.length} file(s) and REVIEW_BEFORE_IMPORT.txt to folder “${dirHandle.name}”.`:message;
   }else{
    const zip=new JSZip();
-   for(let i=0;i<groups.length;i++)zip.file(outputName(groups[i],i),await Astig.makeXlsx(groups[i].records));
+   for(let i=0;i<groups.length;i++)zip.file(names[i],await Astig.makeXlsx(groups[i].records));
    zip.file('REVIEW_BEFORE_IMPORT.txt',report());
    download(await zip.generateAsync({type:'uint8array',compression:'DEFLATE'}),'ASTIG_Converted_Files.zip','application/zip');
   }
